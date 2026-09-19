@@ -412,7 +412,7 @@ function viewKitchen(){
   const shown = items.filter(i => ui.filter === 'All' || i.loc === ui.filter);
   const monthStart = todayISO().slice(0,7);
   const binned = S.pantry.log.filter(l => l.action === 'binned' && (l.date||'').startsWith(monthStart)).length;
-  let h = `<p class="lede">What\u2019s in your fridge, freezer and cupboards. Plans use this first.</p>
+  let h = `<p class="lede">What\u2019s in your fridge, freezer and cupboards. Shopping you tick adds to it, and \u201cCooked it\u201d takes off what each recipe used. Tap any item to fix it.</p>
   <div class="row-btns"><button class="btn primary" data-act="scan" data-mode="shelf">Scan photos</button><button class="btn" data-act="addItems">Type a list</button></div>`;
   if(!items.length){
     return h + `<div class="empty mt"><strong>Your kitchen is empty</strong>Snap your cupboards, fridge and freezer and Claude will list what\u2019s there. You check it before anything\u2019s added.</div>`;
@@ -573,7 +573,8 @@ function viewShop(){
   const got = buy.filter(e => S.plan.shopping.checked[e.key]).length;
   const pct = buy.length ? Math.round(got/buy.length*100) : 0;
   const est = buy.reduce((a,e) => a + e.parts.reduce((b,p) => b + (+p.price||0), 0), 0);
-  let h = `<p class="lede">Tick as it goes in the trolley. Tap \u201cHave it\u201d for anything already at home.</p>
+  const forWhat = `<div class="banner"><div class="main"><b>${esc(weekLabel() || 'This week')}</b><div class="muted" style="font-size:14px">${esc(S.plan.recipes.map(r => r.title).join(', '))}</div></div></div>${S.plan.draft && S.plan.draft.options.length && !S.plan.draft.append ? '<p class="hint" style="margin-top:-6px">You have new ideas waiting. This list switches to the new week as soon as you tap Build my week.</p>' : ''}`;
+  let h = forWhat + `<p class="lede">Tick as it goes in the trolley. Tap \u201cHave it\u201d for anything already at home.</p>
   <div><b>${got} of ${buy.length}</b> <span class="muted">in the trolley${est?`. Estimated shop about ${money(est)}`:''}</span><div class="bar"><i style="width:${pct}%"></i></div></div>`;
   for(const a of AISLES){
     const rows = buy.filter(e => e.aisle === a); if(!rows.length) continue;
@@ -596,10 +597,8 @@ function viewShop(){
     h += `<div class="section"><h2>Already at home</h2><span class="count">${have.length}</span></div><div class="list">${have.map(e =>
       `<div class="shop-row"><div style="flex:1" class="muted">${esc(e.name)}</div><button class="btn small ghost" data-act="undoHave" data-k="${esc(e.key)}">Undo</button></div>`).join('')}</div>`;
   }
-  const toStock = buy.filter(e => S.plan.shopping.checked[e.key] && !S.plan.shopping.stocked[e.key]).length;
-  h += `<button class="btn primary full mt" data-act="stock" ${toStock?'':'disabled'} style="margin-top:22px">Put ${toStock||''} ticked ${toStock===1?'item':'items'} in the kitchen</button>
-  <button class="btn full mt" data-act="scan" data-mode="haul">Or scan your shopping instead</button>
-  <p class="hint">Either way, what you bought goes on your kitchen list so next week\u2019s plan knows about it.</p>`;
+  h += `<p class="hint" style="margin-top:22px">Anything you tick or mark \u201cHave it\u201d goes straight onto your kitchen list, so planning knows it\u2019s there. Untick to take it back off.</p>
+  <button class="btn full mt" data-act="scan" data-mode="haul">Scan your shopping instead</button>`;
   return h;
 }
 
@@ -745,17 +744,50 @@ function stepLi(rid, sk, text, bowls, mins){
   return `<li data-act="step" data-r="${rid}" data-s="${sk}" class="${on?'done':''}"><div>${bowls.length?`<div class="bw">${bowls.map(n=>bowl(n,'sm')).join('')}</div>`:''}<span class="t">${esc(text)}</span>${mins?` <span class="mins">${esc(mins)} min</span>`:''}</div></li>`;
 }
 const RATE_CHIPS = ['Loved it','Too spicy','Not spicy enough','Too bland','Took too long','Too fiddly','Portions too small','Great for lunch','Reheated badly'];
+const LOC_FOR = a => ({'Meat':'Fridge','Dairy & eggs':'Fridge','Produce':'Fridge','Frozen':'Freezer'})[a] || 'Cupboard';
+function stockEntry(e, haveIt){
+  const sh = S.plan.shopping;
+  if(sh.stocked[e.key]) return;
+  const existing = S.pantry.items.find(p => sameThing(p.name, e.name));
+  if(haveIt && existing){ sh.stocked[e.key] = 'existing'; return; }
+  const item = {id:newId(), name:shopName(e.name), qty: haveIt ? '' : totalText(e), loc:LOC_FOR(e.aisle), useBy:'', low:false, added:todayISO()};
+  S.pantry.items.push(item); sh.stocked[e.key] = item.id;
+}
+function unstock(k){
+  const sh = S.plan.shopping, id = sh.stocked[k];
+  if(id && id !== true && id !== 'existing') S.pantry.items = S.pantry.items.filter(p => p.id !== id);
+  delete sh.stocked[k];
+}
+function usePlan(r){
+  // For each kitchen item this recipe uses: remove it, or leave the remainder when there's clearly some left.
+  const plan = new Map();
+  for(const i of (r.ingredients||[])){
+    if(i.status === 'staple') continue;
+    const p = S.pantry.items.find(x => sameThing(x.name, i.name)); if(!p) continue;
+    const need = (i.buyQty && UNIT[i.buyUnit]) ? {n:i.buyQty*UNIT[i.buyUnit][1], u:UNIT[i.buyUnit][0]} : parseQty(i.qty);
+    const cur = plan.get(p.id) || {p, need:null, bad:false};
+    if(need && (!cur.need || cur.need.u === need.u)) cur.need = {n:(cur.need ? cur.need.n : 0) + need.n, u:need.u}; else if(!need) cur.bad = true;
+    plan.set(p.id, cur);
+  }
+  return [...plan.values()].map(({p, need, bad}) => {
+    const have = parseQty(p.qty);
+    if(!bad && need && have && have.u === need.u && have.n > need.n * 1.1){
+      return {p, action:'reduce', left: fmtQty(have.n - need.n, have.u)};
+    }
+    return {p, action:'remove', unsure: !have};
+  });
+}
 function sheetCooked(id){
   const r = S.plan.recipes.find(x => x.id === id); if(!r) return;
   ui.rating = {v:null, chips:[]};
-  const used = (r.ingredients||[]).filter(i => i.status === 'have' || i.status === 'top-up');
-  const matches = S.pantry.items.filter(p => used.some(i => sameThing(p.name, i.name)));
+  ui.usePlan = usePlan(r);
+  const matches = ui.usePlan;
   openSheet('How was it?', `<p class="muted" style="margin-top:0">${esc(r.title)}</p>
     <div class="grid2"><button class="rate" data-act="rate" data-v="up" aria-pressed="false">Make again</button><button class="rate" data-act="rate" data-v="down" aria-pressed="false">Not again</button></div>
     <label class="f"><span>Anything to remember?</span></label>
     <div class="chips">${RATE_CHIPS.map(c=>`<button class="chip" data-act="rchip" data-v="${esc(c)}" aria-pressed="false">${esc(c)}</button>`).join('')}</div>
     <input type="text" id="rNote" class="mt" placeholder="Less chilli, more sauce next time">
-    ${matches.length ? `<p class="mt"><b>Anything used up?</b> Ticked items come off your kitchen list.</p><div class="list">${matches.map(p=>`<label class="item" style="cursor:pointer"><input type="checkbox" class="usedChk" value="${p.id}" style="width:22px;height:22px;accent-color:var(--herb)"><div class="main"><div class="name">${esc(p.name)}</div><div class="sub">${esc(p.qty||'')}</div></div></label>`).join('')}</div>` : ''}
+    ${matches.length ? `<p class="mt"><b>Updating your kitchen</b><br><span class="muted" style="font-size:14px">This is what the recipe used. Untick anything that\u2019s not right.</span></p><div class="list">${matches.map(m=>`<label class="item" style="cursor:pointer"><input type="checkbox" class="usedChk" value="${m.p.id}" ${m.unsure?'':'checked'} style="width:22px;height:22px"><div class="main"><div class="name">${esc(m.p.name)}</div><div class="sub">${m.action==='reduce' ? 'About ' + esc(m.left) + ' left' : m.unsure ? 'Tick if it\u2019s all used up' : 'Used up'}</div></div></label>`).join('')}</div>` : ''}
     <button class="btn primary full mt" data-act="confirmCooked" data-id="${r.id}">Done</button>`);
 }
 function sheetLibrary(){
@@ -1323,9 +1355,16 @@ const ACT = {
   swap: t => swap(t.dataset.id),
   cooked: t => sheetCooked(t.dataset.id),
   confirmCooked: t => {
-    const ids = [...document.querySelectorAll('.usedChk:checked')].map(c => c.value);
-    ids.forEach(id => { const i = S.pantry.items.find(x => x.id === id); if(i) S.pantry.log.unshift({name:i.name, action:'used', date:todayISO()}); });
+    const ticked = [...document.querySelectorAll('.usedChk:checked')].map(c => c.value);
+    const plan = (ui.usePlan || []).filter(m => ticked.includes(m.p.id));
+    const ids = [];
+    plan.forEach(m => {
+      const i = S.pantry.items.find(x => x.id === m.p.id); if(!i) return;
+      if(m.action === 'reduce'){ i.qty = m.left; }
+      else { ids.push(i.id); S.pantry.log.unshift({name:i.name, action:'used', date:todayISO()}); }
+    });
     S.pantry.items = S.pantry.items.filter(x => !ids.includes(x.id)); S.pantry.log = S.pantry.log.slice(0, 200);
+    if(plan.length) save('pantry');
     S.plan.cooked[t.dataset.id] = true; save('plan'); if(ids.length) save('pantry');
     const r = S.plan.recipes.find(x => x.id === t.dataset.id), rt = ui.rating || {};
     const note = [...(rt.chips||[]), ($('#rNote').value||'').trim()].filter(Boolean).join(', ');
@@ -1360,9 +1399,20 @@ const ACT = {
   step: t => { const o = openSteps[t.dataset.r] || (openSteps[t.dataset.r] = {}); o[t.dataset.s] = !o[t.dataset.s]; t.classList.toggle('done', o[t.dataset.s]); },
   pdfOne: t => pdfOne(t.dataset.id, !!t.dataset.lib),
   pdfWeek: () => pdfWeek(),
-  tick: t => { const k = t.dataset.k, sh = S.plan.shopping; if(sh.checked[k]) delete sh.checked[k]; else sh.checked[k] = true; save('plan'); render(); },
-  have: t => { const sh = S.plan.shopping; sh.have[t.dataset.k] = true; delete sh.toBuy[t.dataset.k]; delete sh.checked[t.dataset.k]; save('plan'); render(); },
-  undoHave: t => { delete S.plan.shopping.have[t.dataset.k]; save('plan'); render(); },
+  tick: t => {
+    const k = t.dataset.k, sh = S.plan.shopping, e = shoppingList().find(x => x.key === k);
+    if(sh.checked[k]){ delete sh.checked[k]; unstock(k); }
+    else { sh.checked[k] = true; if(e) stockEntry(e, false); }
+    save('plan'); save('pantry'); render();
+  },
+  have: t => {
+    const k = t.dataset.k, sh = S.plan.shopping, e = shoppingList().find(x => x.key === k);
+    if(sh.checked[k]) unstock(k);
+    sh.have[k] = true; delete sh.toBuy[k]; delete sh.checked[k];
+    if(e) stockEntry(e, true);
+    save('plan'); save('pantry'); render();
+  },
+  undoHave: t => { const k = t.dataset.k; delete S.plan.shopping.have[k]; unstock(k); save('plan'); save('pantry'); render(); },
   toBuy: t => { S.plan.shopping.toBuy[t.dataset.k] = true; save('plan'); render(); },
   addExtra: () => {
     const name = $('#extraName').value.trim(); if(!name){ $('#extraName').focus(); return; }
