@@ -216,6 +216,10 @@ nav.tabs button *{pointer-events:none}
 .ract .sp{flex:1}
 .banner{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:14px}
 .banner .main{flex:1}
+.usechoice{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+.usechoice button{border:1.5px solid var(--line);background:var(--surface);border-radius:10px;padding:9px 8px;font-size:14px;cursor:pointer;min-height:42px}
+.usechoice button[aria-pressed="true"]{background:var(--btn);border-color:var(--btn);color:var(--btn-ink);font-weight:700}
+.usechoice button[disabled]{opacity:.45}
 .qty{font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right}
 .toast{position:fixed;left:50%;bottom:calc(86px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:11px 16px;border-radius:12px;font-size:15px;z-index:80;max-width:calc(100% - 32px);box-shadow:0 6px 20px rgba(0,0,0,.2)}
 .toast[hidden]{display:none}
@@ -252,7 +256,22 @@ function dateTag(iso, est){
   return `<span class="tag">Use by ${t}${dt.toLocaleDateString(undefined,{day:'numeric',month:'short'})}</span>`;
 }
 const norm = s => String(s||'').toLowerCase().replace(/\(.*?\)/g,'').split(',')[0].replace(/[^a-z ]/g,' ').replace(/\s+/g,' ').trim().replace(/(es|s)$/,'');
-function sameThing(a, b){ a = norm(a); b = norm(b); if(a.length < 3 || b.length < 3) return a === b; return a === b || a.includes(b) || b.includes(a); }
+const MODIFIER = new Set(['fresh','minced','chopped','diced','sliced','crushed','grated','ground','shredded','boneless','skinless','large','small','medium','baby','ripe','organic','free','range','unsalted','salted','plain','whole','light','low','fat','reduced','semi','skimmed','extra','virgin','raw','cooked','peeled','trimmed','lean','thick','thin','fine','coarse','white','value','store','brand','pack','packet','loose','bag','bunch','jar','tub','bottle','box','carton','pot','good','quality','best']);
+function words(s){ return norm(s).split(' ').filter(Boolean); }
+function coreWords(s){ const w = words(s).filter(x => !MODIFIER.has(x)); return w.length ? w : words(s); }
+function sameThing(a, b){
+  const A = coreWords(a), B = coreWords(b);
+  if(!A.length || !B.length) return false;
+  if(A.join(' ') === B.join(' ')) return true;
+  // the last word is the thing itself ("oat milk" is milk, not oats), so it has to match
+  // different core words mean different things ("oat milk" is not "oats", "almond butter" is not "butter"),
+  // so only a handful of harmless extra words are allowed
+  const EXTRA = new Set(['porridge','rolled','jumbo','block','wedge','loaf','fillet','mince','breast','leg']);
+  if(A[A.length-1] !== B[B.length-1]) return false;
+  const [big, small] = A.length >= B.length ? [A, B] : [B, A];
+  if(big.length - small.length !== 1) return false;
+  return small.every(w => big.includes(w)) && big.filter(w => !small.includes(w)).every(w => EXTRA.has(w));
+}
 function bannedIn(names){
   const A = (S.taste && S.taste.avoid) || [];
   return A.filter(a => names.some(n => { const x = norm(n), y = norm(a); return y.length >= 3 && (x === y || (' '+x+' ').includes(' '+y+' ') || (' '+x+' ').includes(' '+y)); }));
@@ -343,7 +362,8 @@ const DEF = {
   settings:{region:'UK', servings:4, maxMins:60, equipment:['Oven','Hob','Air fryer','Slow cooker'], equipmentNotes:'', avoid:'Fish and seafood', likes:'Meat-focused meals', notes:'', location:'Las Vegas, NV', currency:'$', budget:25},
   plan:{recipes:[], draft:null, shopping:{checked:{}, have:{}, toBuy:{}, stocked:{}, extras:[]}, cooked:{}, created:null, notes:''},
   library:{recipes:[], recent:[]},
-  taste:{liked:[], disliked:[], passed:[], avoid:[]}
+  taste:{liked:[], disliked:[], passed:[], avoid:[]},
+  extras:{recipes:[]}
 };
 const KEYS = Object.keys(DEF);
 function fill(k, data){
@@ -413,7 +433,8 @@ function viewKitchen(){
   const monthStart = todayISO().slice(0,7);
   const binned = S.pantry.log.filter(l => l.action === 'binned' && (l.date||'').startsWith(monthStart)).length;
   let h = `<p class="lede">What\u2019s in your fridge, freezer and cupboards. Shopping you tick adds to it, and \u201cCooked it\u201d takes off what each recipe used. Tap any item to fix it.</p>
-  <div class="row-btns"><button class="btn primary" data-act="scan" data-mode="shelf">Scan photos</button><button class="btn" data-act="addItems">Type a list</button></div>`;
+  <div class="row-btns"><button class="btn primary" data-act="scan" data-mode="shelf">Scan photos</button><button class="btn" data-act="addItems">Type a list</button></div>
+  <button class="btn full mt" data-act="snack">Make something now</button>`;
   if(!items.length){
     return h + `<div class="empty mt"><strong>Your kitchen is empty</strong>Snap your cupboards, fridge and freezer and Claude will list what\u2019s there. You check it before anything\u2019s added.</div>`;
   }
@@ -687,10 +708,33 @@ function sheetAddItems(){
     ${itemForm({})}
     <button class="btn full mt" data-act="saveItem">Add item</button>`);
 }
+const QTY_UNITS = ['', 'g', 'kg', 'ml', 'L', 'oz', 'lb', 'tbsp', 'tsp', 'jar', 'tin', 'pack', 'bag', 'bottle', 'bunch', 'box'];
+const UNIT_LABEL = {'':'items', g:'g', kg:'kg', ml:'ml', L:'L', oz:'oz', lb:'lb', tbsp:'tbsp', tsp:'tsp', jar:'jars', tin:'tins', pack:'packs', bag:'bags', bottle:'bottles', bunch:'bunches', box:'boxes'};
+const SMALL_MEASURE = new Set(['tsp','tbsp','pinch','clove','splash','dash','handful','sprig','leaf','drizzle','squeeze','knob']);
+function qtyString(n, u){
+  if(!n) return '';
+  const num = Math.round(n*100)/100;
+  if(['g','kg','ml','L'].includes(u)) return num + u;
+  if(!u) return String(num);
+  return num + ' ' + (num > 1 ? UNIT_LABEL[u] || u + 's' : u);
+}
+function splitQty(q){
+  const m = String(q||'').trim().match(/^(\d*\.?\d+)\s*([a-zA-Z]*)/);
+  if(!m) return {n:'', u:''};
+  let u = (m[2]||'').toLowerCase().replace(/s$/,'');
+  if(u === 'l') u = 'L'; if(u === 'litre' || u === 'liter') u = 'L';
+  if(!QTY_UNITS.includes(u)) u = QTY_UNITS.includes(u.toUpperCase()) ? u.toUpperCase() : '';
+  return {n:m[1], u};
+}
 function itemForm(i){
   return `<label class="f"><span>Item</span><input type="text" id="fName" value="${esc(i.name)}" placeholder="Chicken thighs"></label>
-  <div class="grid2"><label class="f"><span>Amount</span><input type="text" id="fQty" value="${esc(i.qty)}" placeholder="1kg"></label>
-  <label class="f"><span>Where</span><select id="fLoc">${['Fridge','Freezer','Cupboard'].map(l=>`<option ${i.loc===l?'selected':''}>${l}</option>`).join('')}</select></label></div>
+  <label class="f"><span>How much</span></label>
+  <div class="grid2" style="grid-template-columns:1fr 1.2fr">
+    <input type="text" inputmode="decimal" id="fQtyN" value="${esc(splitQty(i.qty).n)}" placeholder="1">
+    <select id="fQtyU">${QTY_UNITS.map(u=>`<option value="${u}" ${splitQty(i.qty).u===u?'selected':''}>${UNIT_LABEL[u]}</option>`).join('')}</select>
+  </div>
+  <p class="hint">Leave the number blank if you don\u2019t know. For a jar or bottle, 1 jar is fine.</p>
+  <label class="f"><span>Where</span><select id="fLoc">${['Fridge','Freezer','Cupboard'].map(l=>`<option ${i.loc===l?'selected':''}>${l}</option>`).join('')}</select></label>
   <label class="f"><span>Use by</span><input type="date" id="fDate" value="${esc(i.useBy||'')}"></label>`;
 }
 function sheetEditItem(id){
@@ -702,9 +746,14 @@ function sheetEditItem(id){
     <div class="grid2"><button class="btn" data-act="useUp" data-id="${i.id}">Used it up</button><button class="btn danger" data-act="bin" data-id="${i.id}">Binned it</button></div>
     <p class="hint">Binned items count toward your waste tally. Both remove it from the kitchen.</p>`);
 }
+function findRecipe(id, fromLibrary){
+  return (fromLibrary ? S.library.recipes.find(x => x.id === id) : null)
+    || S.plan.recipes.find(x => x.id === id) || S.extras.recipes.find(x => x.id === id) || S.library.recipes.find(x => x.id === id);
+}
 function sheetRecipe(id, fromLibrary){
-  const r = fromLibrary ? S.library.recipes.find(x => x.id === id) : S.plan.recipes.find(x => x.id === id);
+  const r = findRecipe(id, fromLibrary);
   if(!r) return;
+  const isExtra = S.extras.recipes.some(x => x.id === id);
   const done = openSteps[r.id] || (openSteps[r.id] = {});
   const statusLbl = {have:'In your kitchen', 'top-up':'Top up', buy:'To buy', staple:'Cupboard staple'};
   const body = `<article class="cook">
@@ -728,7 +777,7 @@ function sheetRecipe(id, fromLibrary){
     <p class="hint mt">Tap a step to cross it off.</p>
     <button class="linkbtn" style="padding-left:0" data-act="notForMeRecipe" data-id="${r.id}" data-lib="${fromLibrary?1:''}">Something in here I don\u2019t eat</button>
   </article>`;
-  openSheet('', body, pdfReady() ? `<button class="btn small" data-act="pdfOne" data-id="${r.id}" data-lib="${fromLibrary?1:''}">Save PDF</button>` : '');
+  openSheet('', body, `${isExtra ? `<button class="btn small primary" data-act="madeIt" data-id="${r.id}">Made it</button><button class="btn small" data-act="keepExtra" data-id="${r.id}">Save</button>` : ''}${pdfReady() ? `<button class="btn small" data-act="pdfOne" data-id="${r.id}" data-lib="${fromLibrary?1:''}">Save PDF</button>` : ''}`);
 }
 function storeHtml(r){
   const s = r.storage; if(!s) return '';
@@ -758,7 +807,8 @@ function unstock(k){
   if(id && id !== true && id !== 'existing') S.pantry.items = S.pantry.items.filter(p => p.id !== id);
   delete sh.stocked[k];
 }
-function usePlan(r){
+function usePlan(r){ return usePlanCalc(r); }
+function usePlanCalc(r){
   // For each kitchen item this recipe uses: remove it, or leave the remainder when there's clearly some left.
   const plan = new Map();
   for(const i of (r.ingredients||[])){
@@ -771,11 +821,36 @@ function usePlan(r){
   }
   return [...plan.values()].map(({p, need, bad}) => {
     const have = parseQty(p.qty);
-    if(!bad && need && have && have.u === need.u && have.n > need.n * 1.1){
-      return {p, action:'reduce', left: fmtQty(have.n - need.n, have.u)};
+    if(!bad && need && have && have.u === need.u){
+      if(have.n > need.n * 1.1) return {p, used: fmtQty(need.n, need.u), left: fmtQty(have.n - need.n, have.u), choice:'reduce'};
+      return {p, used: fmtQty(need.n, need.u), left:'', choice:'used'};
     }
-    return {p, action:'remove', unsure: !have};
+    // different units: a teaspoon out of a jar shouldn't wipe the jar out
+    const small = need && SMALL_MEASURE.has(need.u);
+    return {p, used: need ? fmtQty(need.n, need.u) : '', left:'', choice: small || !have ? 'leave' : 'leave', unsure:true};
   });
+}
+function useRows(list){
+  return `<div class="list">${list.map((m,k)=>`<div class="item" style="display:block;cursor:default">
+    <div class="name">${esc(m.p.name)}</div>
+    <div class="sub">${esc(m.p.qty || 'amount not set')}${m.used?`, recipe used ${esc(m.used)}`:''}</div>
+    <div class="usechoice" role="group">
+      <button data-act="useChoice" data-i="${k}" data-v="reduce" aria-pressed="${m.choice==='reduce'}" ${m.left?'':'disabled'}>${m.left?'Leave '+esc(m.left):'Take some off'}</button>
+      <button data-act="useChoice" data-i="${k}" data-v="used" aria-pressed="${m.choice==='used'}">Used up</button>
+      <button data-act="useChoice" data-i="${k}" data-v="low" aria-pressed="${m.choice==='low'}">Running low</button>
+      <button data-act="useChoice" data-i="${k}" data-v="leave" aria-pressed="${m.choice==='leave'}">Leave as is</button>
+    </div></div>`).join('')}</div>`;
+}
+function applyUse(){
+  const ids = [];
+  (ui.usePlan || []).forEach(m => {
+    const i = S.pantry.items.find(x => x.id === m.p.id); if(!i) return;
+    if(m.choice === 'reduce' && m.left) i.qty = m.left;
+    else if(m.choice === 'used'){ ids.push(i.id); S.pantry.log.unshift({name:i.name, action:'used', date:todayISO()}); }
+    else if(m.choice === 'low') i.low = true;
+  });
+  S.pantry.items = S.pantry.items.filter(x => !ids.includes(x.id)); S.pantry.log = S.pantry.log.slice(0, 200);
+  save('pantry'); ui.usePlan = null;
 }
 function sheetCooked(id){
   const r = S.plan.recipes.find(x => x.id === id); if(!r) return;
@@ -787,8 +862,93 @@ function sheetCooked(id){
     <label class="f"><span>Anything to remember?</span></label>
     <div class="chips">${RATE_CHIPS.map(c=>`<button class="chip" data-act="rchip" data-v="${esc(c)}" aria-pressed="false">${esc(c)}</button>`).join('')}</div>
     <input type="text" id="rNote" class="mt" placeholder="Less chilli, more sauce next time">
-    ${matches.length ? `<p class="mt"><b>Updating your kitchen</b><br><span class="muted" style="font-size:14px">This is what the recipe used. Untick anything that\u2019s not right.</span></p><div class="list">${matches.map(m=>`<label class="item" style="cursor:pointer"><input type="checkbox" class="usedChk" value="${m.p.id}" ${m.unsure?'':'checked'} style="width:22px;height:22px"><div class="main"><div class="name">${esc(m.p.name)}</div><div class="sub">${m.action==='reduce' ? 'About ' + esc(m.left) + ' left' : m.unsure ? 'Tick if it\u2019s all used up' : 'Used up'}</div></div></label>`).join('')}</div>` : ''}
+    ${matches.length ? `<p class="mt"><b>Updating your kitchen</b><br><span class="muted" style="font-size:14px">Change anything that isn\u2019t right.</span></p>` + useRows(matches) : ''}
     <button class="btn primary full mt" data-act="confirmCooked" data-id="${r.id}">Done</button>`);
+}
+const SNACK_KINDS = ['Quick snack','Sweet bake','Savoury bake','Pudding','Lunch for one'];
+function sheetSnack(){
+  if(!SAMPLE){ toast('Add your Claude API key in Setup first.'); ui.tab = 'setup'; render(); return; }
+  ui.snack = ui.snack || {kind:'Quick snack', mins:30, strict:true, ideas:null, busy:false};
+  const s = ui.snack;
+  openSheet('Make something now', `
+    <p class="muted" style="margin-top:0">Ideas from what\u2019s actually in your kitchen right now.</p>
+    <div class="chips">${SNACK_KINDS.map(k=>`<button class="chip" data-act="snackKind" data-v="${esc(k)}" aria-pressed="${s.kind===k}">${esc(k)}</button>`).join('')}</div>
+    <label class="f"><span>Time you\u2019ve got</span></label>
+    <div class="stepper">${[15,30,60].map(n=>`<button data-act="snackMins" data-n="${n}" aria-pressed="${s.mins===n}" style="font-size:18px">${n}m</button>`).join('')}</div>
+    <label class="check"><input type="checkbox" data-act="snackStrict" ${s.strict?'checked':''}> Only what I\u2019ve already got</label>
+    <button class="btn primary full mt" data-act="snackGo" ${s.busy?'disabled':''}>${s.busy?'Thinking\u2026':'Show me ideas'}</button>
+    <div id="snackOut" class="mt">${snackIdeasHtml()}</div>`);
+}
+function snackIdeasHtml(){
+  const s = ui.snack;
+  if(s.busy) return `<div class="progress"><div class="bowls-row">${bowl(1)}${bowl(2)}${bowl(3)}</div><div class="msg">${esc(s.msg || 'Looking in your kitchen\u2026')}</div></div>`;
+  if(!s.ideas) return '';
+  if(!s.ideas.length) return '<p class="hint">Nothing obvious with what\u2019s in there. Try turning off \u201conly what I\u2019ve already got\u201d.</p>';
+  return `<div class="section"><h2>Ideas</h2></div>` + s.ideas.map((o,k)=>`<div class="opt"><button class="optPick" data-act="snackPick" data-i="${k}">
+    <span class="optTick"></span><span class="optMain"><span class="optTitle">${esc(o.title)}</span><span class="optBlurb">${esc(o.blurb)}</span>
+    <span class="meta"><span class="tag">${esc(o.mins)} min</span>${(o.missing||[]).length?`<span class="tag soon">Need ${esc(o.missing.join(', '))}</span>`:'<span class="tag low">All in your kitchen</span>'}</span></span></button></div>`).join('');
+}
+function snackPrompt(){
+  const s = ui.snack, set = S.settings;
+  return `Suggest 5 things they could make right now. Today is ${todayISO()}.
+Type: ${s.kind}. Ready in ${s.mins} minutes or less, start to finish.
+${s.strict ? 'Use ONLY what is in the kitchen list below, plus cupboard staples (salt, pepper, oil, common dried spices, flour, sugar, baking powder if listed).' : 'Mostly use the kitchen list below; at most 2 cheap extra ingredients per idea, listed in "missing".'}
+- Prefer ideas that use things nearest their use-by date.
+- Avoid: ${set.avoid || 'nothing specific'}.${(S.taste.avoid||[]).length ? ' Never use: ' + S.taste.avoid.join(', ') + '.' : ''}
+- Equipment: ${[...set.equipment, set.equipmentNotes].filter(Boolean).join(', ') || 'oven and hob'}.
+- Write for ${set.region === 'US' ? 'a US kitchen (US names and units)' : 'a UK kitchen (UK names, metric)'}.
+
+Kitchen contents (name | amount | where | use by):
+${kitchenLines()}
+
+Reply with only JSON: {"options":[{"title":"Cheese and onion soda bread rolls","blurb":"One line on what it is.","mins":25,"uses":["cheddar","flour"],"missing":[]}]}`;
+}
+function snackBuildPrompt(o){
+  const s = ui.snack, set = S.settings;
+  return `Write the full recipe for: ${o.title} (${o.blurb}). Today is ${todayISO()}.
+- Ready in ${s.mins} minutes or less. ${s.strict ? 'Only use what is in the kitchen list plus cupboard staples.' : 'Keep extra shopping to a minimum.'}
+- Equipment: ${[...set.equipment, set.equipmentNotes].filter(Boolean).join(', ') || 'oven and hob'}.
+- Write for ${set.region === 'US' ? 'a US kitchen (US names and units)' : 'a UK kitchen (UK names, metric)'}.
+- Mise en place style: group prepped ingredients into numbered bowls (1 to 4), and have the method refer to bowls by number.
+- Ingredient "status": "have" if it's in the kitchen list, "staple" for salt, pepper, oil and common dried spices, otherwise "buy". "cost" can be a rough estimate in ${set.currency}.
+- "storage" should say how to keep it and how long for.
+
+Kitchen contents (name | amount | where | use by):
+${kitchenLines()}
+
+Reply with only JSON: {"recipe": ${SHAPE}}`;
+}
+async function snackIdeas(){
+  const s = ui.snack; s.busy = true; s.msg = 'Looking in your kitchen\u2026'; sheetSnack();
+  try{
+    const out = await SAMPLE.json(snackPrompt(), {cache:false});
+    const list = (Array.isArray(out) ? out : (out && out.options) || []).filter(o => o && o.title)
+      .map(o => ({title:String(o.title), blurb:String(o.blurb||''), mins:+o.mins||0, uses:(o.uses||[]).map(String), missing:(o.missing||[]).map(String)}))
+      .filter(o => !bannedIn([o.title, ...o.uses, ...o.missing]).length);
+    s.ideas = list;
+  }catch(e){ toast(errCopy(e)); }
+  finally{ s.busy = false; sheetSnack(); }
+}
+async function snackBuild(i){
+  const s = ui.snack, o = s.ideas[i]; if(!o) return;
+  s.busy = true; s.msg = `Writing ${o.title}\u2026`; sheetSnack();
+  try{
+    const data = await SAMPLE.json(snackBuildPrompt(o), {cache:false});
+    const r = cleanRecipe((data && (data.recipe || (data.recipes && data.recipes[0]))) || data);
+    if(!r.ingredients.length) throw {code:'invalid_json'};
+    r.kind = s.kind;
+    S.extras.recipes.unshift(r); S.extras.recipes = S.extras.recipes.slice(0, 12); save('extras');
+    s.busy = false;
+    sheetRecipe(r.id);
+  }catch(e){ s.busy = false; toast(errCopy(e)); sheetSnack(); }
+}
+function sheetUsed(id){
+  const r = findRecipe(id); if(!r) return;
+  ui.usePlan = usePlan(r);
+  const m = ui.usePlan;
+  openSheet('Made it', m.length ? `<p class="muted" style="margin-top:0">${esc(r.title)}. Change anything that isn\u2019t right.</p>` + useRows(m) + `
+    <button class="btn primary full mt" data-act="confirmUsed">Update my kitchen</button>`
+    : `<p class="muted">Nothing from your kitchen list to update.</p><button class="btn full mt" data-act="close">Close</button>`);
 }
 function sheetLibrary(){
   const L = S.library.recipes;
@@ -883,7 +1043,7 @@ function sheetScanReview(){
       <select data-scan="${k}" data-f="loc">${['Fridge','Freezer','Cupboard'].map(l=>`<option ${it.loc===l?'selected':''}>${l}</option>`).join('')}</select>
       <input type="date" data-scan="${k}" data-f="useBy" value="${esc(it.useBy)}"></div>
       ${it.est&&it.useBy?'<p class="hint">Use-by is an estimate from typical shelf life.</p>':''}
-      ${it.dup?`<p class="hint">Already listed as \u201c${esc(it.dupName)}\u201d. ${haul?'This adds a new batch.':'This updates it.'}</p>`:''}
+      ${it.dup?`<div class="mt"><p class="hint" style="margin:0 0 6px">You already have \u201c${esc(it.dupName)}\u201d.</p><div class="seg" role="group"><button data-act="scanMerge" data-i="${k}" data-v="" aria-pressed="${!it.merge}">Add separately</button><button data-act="scanMerge" data-i="${k}" data-v="1" aria-pressed="${!!it.merge}">Update that one</button></div></div>`:''}
     </div>`).join('')}
     <button class="btn primary full mt" data-act="scanAdd">Add to kitchen</button>`);
 }
@@ -893,7 +1053,7 @@ function scanAdd(){
   let added = 0, updated = 0;
   for(const i of keep){
     const data = {name:i.name.trim(), qty:i.qty.trim(), loc:i.loc, useBy:i.useBy, est:i.est && !!i.useBy};
-    const ex = sc.mode === 'shelf' && i.dup && S.pantry.items.find(p => p.id === i.dup);
+    const ex = i.merge && i.dup && S.pantry.items.find(p => p.id === i.dup);
     if(ex){ Object.assign(ex, data, {low:false}); updated++; }
     else { S.pantry.items.push(Object.assign({id:newId(), low:false, added:todayISO()}, data)); added++; }
   }
@@ -1279,7 +1439,7 @@ async function savePdf(pdf, name){
   catch(e){ if(!(e && e.code === 'declined')) toast('Couldn\u2019t save the PDF here.'); }
 }
 function pdfOne(id, lib){
-  const r = (lib ? S.library.recipes : S.plan.recipes).find(x => x.id === id); if(!r) return;
+  const r = findRecipe(id, lib); if(!r) return;
   const pdf = new window.jspdf.jsPDF({unit:'mm', format:'a4'}); pdfRecipe(pdf, r, true);
   savePdf(pdf, pdfClean(r.title).replace(/[\\/:*?"<>|]/g,'').slice(0,80) + '.pdf');
 }
@@ -1300,7 +1460,7 @@ const ACT = {
   editItem: t => sheetEditItem(t.dataset.id),
   saveItem: t => {
     const name = $('#fName').value.trim(); if(!name){ $('#fName').focus(); return; }
-    const data = {name, qty:$('#fQty').value.trim(), loc:$('#fLoc').value, useBy:$('#fDate').value};
+    const data = {name, qty: qtyString(parseFloat($('#fQtyN').value), $('#fQtyU').value), loc:$('#fLoc').value, useBy:$('#fDate').value};
     if(t.dataset.id){ const i = S.pantry.items.find(x => x.id === t.dataset.id); if(i){ if(i.useBy !== data.useBy) data.est = false; Object.assign(i, data, {low: $('#fLow').checked}); } }
     else S.pantry.items.push(Object.assign({id:newId(), low:false, added:todayISO()}, data));
     save('pantry'); closeSheet(); render(); toast(t.dataset.id ? 'Saved.' : 'Added ' + name + '.');
@@ -1317,7 +1477,7 @@ const ACT = {
   addReqOpt: () => { const v = ($('#reqOpt').value || '').trim(); if(!v){ $('#reqOpt').focus(); return; } addReqOption(v); },
   addReqWeek: () => { const v = ($('#reqWeek').value || '').trim(); if(!v){ $('#reqWeek').focus(); return; } addReqRecipe(v); },
   notForMe: t => { const o = S.plan.draft.options.find(x => x.id === t.dataset.id); if(o) sheetNotForMe(o.ingredients.length ? o.ingredients : [o.title], {type:'option', id:o.id}); },
-  notForMeRecipe: t => { const r = (t.dataset.lib ? S.library.recipes : S.plan.recipes).find(x => x.id === t.dataset.id); if(r) sheetNotForMe(r.ingredients.filter(i => i.status !== 'staple').map(i => i.name), {type:'recipe', id:r.id}); },
+  notForMeRecipe: t => { const r = findRecipe(t.dataset.id, t.dataset.lib); if(r) sheetNotForMe(r.ingredients.filter(i => i.status !== 'staple').map(i => i.name), {type:'recipe', id:r.id}); },
   nfmChip: t => { const p = ui.nfm.picked, v = t.dataset.v, i = p.indexOf(v); if(i >= 0) p.splice(i,1); else p.push(v); t.setAttribute('aria-pressed', i < 0); },
   nfmSave: () => {
     const typed = ($('#nfmText').value || '').split(',');
@@ -1334,6 +1494,27 @@ const ACT = {
   scanMode: t => sheetScan(t.dataset.v),
   scanKeep: t => { const it = ui.scan.items[+t.dataset.i]; it.keep = !it.keep; t.setAttribute('aria-pressed', it.keep); t.innerHTML = it.keep ? ICON.tick : ''; $('#sc'+t.dataset.i).classList.toggle('off', !it.keep); },
   scanAdd: () => scanAdd(),
+  scanMerge: t => { const i = +t.dataset.i; ui.scan.items[i].merge = !!t.dataset.v; sheetScanReview(); },
+  snack: () => sheetSnack(),
+  snackKind: t => { ui.snack.kind = t.dataset.v; ui.snack.ideas = null; sheetSnack(); },
+  snackMins: t => { ui.snack.mins = +t.dataset.n; sheetSnack(); },
+  snackStrict: t => { ui.snack.strict = t.checked; },
+  snackGo: () => snackIdeas(),
+  snackPick: t => snackBuild(+t.dataset.i),
+  madeIt: t => sheetUsed(t.dataset.id),
+  keepExtra: t => {
+    const r = S.extras.recipes.find(x => x.id === t.dataset.id); if(!r) return;
+    if(S.library.recipes.some(x => x.title === r.title)){ toast('Already in your saved recipes.'); return; }
+    const c = clone(r); c.id = newId(); S.library.recipes.unshift(c);
+    while(JSON.stringify(S.library).length > 220000) S.library.recipes.pop();
+    save('library'); toast('Saved to your recipes.');
+  },
+  confirmUsed: () => { applyUse(); closeSheet(); render(); toast('Kitchen updated.'); },
+  useChoice: t => {
+    const m = ui.usePlan[+t.dataset.i]; if(!m) return;
+    m.choice = t.dataset.v;
+    [...t.parentNode.children].forEach(b => b.setAttribute('aria-pressed', b.dataset.v === m.choice));
+  },
   saveKey: () => { const v = ($('#apiKey').value || '').trim(); if(!/^sk-ant-/.test(v)){ toast('That doesn\u2019t look like an Anthropic key. It starts with sk-ant-'); return; } localSet('apikey', v); try{ localStorage.setItem('rk:apikey', v); }catch(e){} initApi(); render(); toast('Key saved. Tap Test connection to check it.'); },
   testKey: async t => { t.disabled = true; t.textContent = 'Testing\u2026'; try{ await API.call('Reply with the word ok.', {quick:true, max:10}); toast('Connected. You\u2019re good to go.'); }catch(e){ toast(errCopy(e)); } t.disabled = false; t.textContent = 'Test connection'; },
   resetModels: () => { try{ localStorage.removeItem('rk:model'); localStorage.removeItem('rk:quick'); }catch(e){} render(); toast('Models reset.'); },
@@ -1355,17 +1536,8 @@ const ACT = {
   swap: t => swap(t.dataset.id),
   cooked: t => sheetCooked(t.dataset.id),
   confirmCooked: t => {
-    const ticked = [...document.querySelectorAll('.usedChk:checked')].map(c => c.value);
-    const plan = (ui.usePlan || []).filter(m => ticked.includes(m.p.id));
-    const ids = [];
-    plan.forEach(m => {
-      const i = S.pantry.items.find(x => x.id === m.p.id); if(!i) return;
-      if(m.action === 'reduce'){ i.qty = m.left; }
-      else { ids.push(i.id); S.pantry.log.unshift({name:i.name, action:'used', date:todayISO()}); }
-    });
-    S.pantry.items = S.pantry.items.filter(x => !ids.includes(x.id)); S.pantry.log = S.pantry.log.slice(0, 200);
-    if(plan.length) save('pantry');
-    S.plan.cooked[t.dataset.id] = true; save('plan'); if(ids.length) save('pantry');
+    applyUse();
+    S.plan.cooked[t.dataset.id] = true; save('plan');
     const r = S.plan.recipes.find(x => x.id === t.dataset.id), rt = ui.rating || {};
     const note = [...(rt.chips||[]), ($('#rNote').value||'').trim()].filter(Boolean).join(', ');
     if(r && (rt.v || note)){
@@ -1443,6 +1615,7 @@ document.addEventListener('change', e => {
   const f = e.target.dataset && e.target.dataset.field;
   if(f){ S.settings[f] = f === 'budget' ? (parseFloat(e.target.value) || 0) : e.target.value; save('settings'); }
   if(e.target.id === 'scanFiles') runScan(e.target.files);
+  if(e.target.dataset && e.target.dataset.act === 'snackStrict' && ui.snack) ui.snack.strict = e.target.checked;
   const lk = e.target.dataset && e.target.dataset.local;
   if(lk){ const v = e.target.value.trim(); try{ if(v) localStorage.setItem('rk:'+lk, v); else localStorage.removeItem('rk:'+lk); }catch(err){} }
   if(e.target.id === 'importFile' && e.target.files[0]){
