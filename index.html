@@ -230,7 +230,7 @@ nav.tabs button *{pointer-events:none}
 </head>
 <body>
 <div class="wrap">
-  <header class="top"><h1>Ralph Kitchen</h1><span class="sync" id="sync">v9</span></header>
+  <header class="top"><h1>Ralph Kitchen</h1><span class="sync" id="sync">v10</span></header>
   <main id="view" aria-live="polite"></main>
 </div>
 <nav class="tabs" aria-label="Sections"><div class="in" id="tabs"></div></nav>
@@ -325,21 +325,45 @@ const API = {
       throw {code, message: msg};
     }
     const data = await res.json();
-    if(data.stop_reason === 'max_tokens') throw {code:'invalid_json'};
-    return (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    const text = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    API.lastStop = data.stop_reason || '';
+    API.lastText = text;
+    return text;
   }
 };
 function b64(blob){ return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob); }); }
 function looseJSON(t){
+  const tidy = s => s.replace(/,\s*([}\]])/g, '$1');
   try{ return JSON.parse(t); }catch(e){}
-  const f = t.match(/```(?:json)?\s*([\s\S]*?)```/); if(f){ try{ return JSON.parse(f[1]); }catch(e){} }
+  const f = t.match(/```(?:json)?\s*([\s\S]*?)```/); if(f){ try{ return JSON.parse(tidy(f[1])); }catch(e){} }
   const idx = ['{','['].map(c => t.indexOf(c)).filter(i => i >= 0); const a = idx.length ? Math.min(...idx) : -1;
   const b = Math.max(t.lastIndexOf('}'), t.lastIndexOf(']'));
-  if(a >= 0 && b > a){ try{ return JSON.parse(t.slice(a, b+1)); }catch(e){} }
-  throw {code:'invalid_json'};
+  if(a >= 0 && b > a){ try{ return JSON.parse(tidy(t.slice(a, b+1))); }catch(e){} }
+  // cut off part way through? keep every whole object we did get
+  const objs = topObjects(t);
+  if(objs.length === 1) return objs[0];
+  if(objs.length > 1) return {options: objs, recipes: objs, salvaged: true};
+  throw {code:'invalid_json', stop: API.lastStop, snippet: String(t || '').slice(0, 160)};
+}
+function topObjects(t){
+  const out = [], starts = []; let str = false, esc = false;
+  for(let i = 0; i < t.length; i++){
+    const c = t[i];
+    if(str){ if(esc) esc = false; else if(c === '\\') esc = true; else if(c === '"') str = false; continue; }
+    if(c === '"'){ str = true; continue; }
+    if(c === '{') starts.push(i);
+    else if(c === '}' && starts.length){
+      const s = starts.pop();
+      try{
+        const o = JSON.parse(t.slice(s, i+1));
+        if(o && o.title && !out.some(x => x.title === o.title)) out.push(o);
+      }catch(e){}
+    }
+  }
+  return out;
 }
 const SAMPLE_API = {
-  json: async (input, opts = {}) => looseJSON(await API.call(input + '\n\nReply with the JSON only, no other text.', {images: opts.images, signal: opts.signal, quick: opts.modelTier === 'quick', max: opts.images ? 4000 : (opts.modelTier === 'quick' ? 2000 : 8000)})),
+  json: async (input, opts = {}) => looseJSON(await API.call(input + '\n\nReply with the JSON only, no other text.', {images: opts.images, signal: opts.signal, quick: opts.modelTier === 'quick', max: opts.images ? 8000 : (opts.modelTier === 'quick' ? 2000 : 16000)})),
   limits: async () => ({maxPromptBytes: 200000, images: {maxCount: 10}})
 };
 const DL_LOCAL = {
@@ -415,7 +439,7 @@ function renderTabs(){
 }
 function render(){
   renderTabs();
-  $('#sync').textContent = SAMPLE ? 'v9' : 'v9, setup needed';
+  $('#sync').textContent = SAMPLE ? 'v10' : 'v10, setup needed';
   const v = $('#view');
   v.innerHTML = ({kitchen:viewKitchen, week:viewWeek, shop:viewShop, setup:viewSetup})[ui.tab]();
 }
@@ -664,6 +688,7 @@ function viewSetup(){
     <label class="f"><span>Anthropic API key</span><input type="password" id="apiKey" placeholder="sk-ant-\u2026" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
     <div class="row-btns mt"><button class="btn primary" data-act="saveKey">Save key</button><button class="btn" data-act="testKey" ${API.key()?'':'disabled'}>Test connection</button></div>
     <p class="hint">Stored only on this phone. Create one at console.anthropic.com under API keys. Usage is billed to your Anthropic account.</p>
+    ${lastErrHtml()}
     <details class="mt"><summary class="muted" style="cursor:pointer">Models</summary>
       <label class="f"><span>Planning and photos</span><input type="text" data-local="model" value="${esc(API.model())}" autocapitalize="off"></label>
       <label class="f"><span>Quick tasks</span><input type="text" data-local="quick" value="${esc(API.quick())}" autocapitalize="off"></label>
@@ -678,6 +703,13 @@ function viewSetup(){
   <p class="hint mt">Your kitchen, plans and saved recipes are stored on this phone. Export a backup now and then.</p>`;
 }
 
+function lastErrHtml(){
+  let e; try{ e = JSON.parse(localStorage.getItem('rk:lasterr') || 'null'); }catch(err){}
+  if(!e) return '';
+  return `<details class="mt"><summary class="muted" style="cursor:pointer">Last problem (${esc(e.code)})</summary>
+    <p class="hint" style="white-space:pre-wrap">${esc(e.when)} UTC, ${esc(e.code)}${e.stop?', stopped: '+esc(e.stop):''}\n${esc(e.snippet || '')}</p>
+    <button class="btn small ghost" data-act="clearErr">Clear</button></details>`;
+}
 function learnedPanel(){
   const t = S.taste;
   const rows = (list, key) => list.map((x,k)=>`<div class="learn-row"><div class="main"><div class="name">${esc(x.title)}</div>${x.note?`<div class="sub muted" style="font-size:14px">${esc(x.note)}</div>`:''}</div><button class="x" data-act="forget" data-list="${key}" data-i="${k}" aria-label="Forget ${esc(x.title)}">\u00d7</button></div>`).join('');
@@ -1150,6 +1182,10 @@ Reply with only JSON: {"recipe": { ... }} where the recipe object looks like:
 ${SHAPE}`;
 }
 function errCopy(e){
+  try{
+    const info = {when:new Date().toISOString().slice(0,16).replace('T',' '), code:(e && e.code) || 'unknown', stop:(e && e.stop) || API.lastStop || '', snippet:(e && (e.snippet || e.message)) || String(API.lastText || '').slice(0,160)};
+    localStorage.setItem('rk:lasterr', JSON.stringify(info));
+  }catch(err){}
   switch(e && e.code){
     case 'bad_key': return 'Your API key was rejected. Check it in Setup.';
     case 'no_credit': return 'Your Anthropic account is out of credit. Top up at console.anthropic.com.';
@@ -1209,6 +1245,7 @@ async function getOptions(more){
     if(!more) ui.requests = '';
     save('plan'); if(drop.length) save('taste');
     ui.showNew = false; ui.viewDraft = true; window.scrollTo(0,0);
+    if(list.length < Math.min(count, 6)) toast(`Only ${list.length} ideas came back. Tap \u201cNew ideas\u201d for more.`);
   }catch(e){ if(!(e && e.code === 'cancelled')) toast(errCopy(e)); }
   finally{ ui.gen = null; ui.genCtl = null; render(); }
 }
@@ -1517,6 +1554,7 @@ const ACT = {
   },
   saveKey: () => { const v = ($('#apiKey').value || '').trim(); if(!/^sk-ant-/.test(v)){ toast('That doesn\u2019t look like an Anthropic key. It starts with sk-ant-'); return; } localSet('apikey', v); try{ localStorage.setItem('rk:apikey', v); }catch(e){} initApi(); render(); toast('Key saved. Tap Test connection to check it.'); },
   testKey: async t => { t.disabled = true; t.textContent = 'Testing\u2026'; try{ await API.call('Reply with the word ok.', {quick:true, max:10}); toast('Connected. You\u2019re good to go.'); }catch(e){ toast(errCopy(e)); } t.disabled = false; t.textContent = 'Test connection'; },
+  clearErr: () => { try{ localStorage.removeItem('rk:lasterr'); }catch(e){} render(); },
   resetModels: () => { try{ localStorage.removeItem('rk:model'); localStorage.removeItem('rk:quick'); }catch(e){} render(); toast('Models reset.'); },
   exportData: () => { const out = {app:'ralph-kitchen', version:1, exported:new Date().toISOString(), data:{}}; KEYS.forEach(k => out.data[k] = S[k]); DL.save({filename:`ralph-kitchen-backup-${todayISO()}.json`, data: JSON.stringify(out, null, 1)}).catch(e => { if(!(e && e.code === 'declined')) toast('Couldn\u2019t export.'); }); },
   copyMsg: async () => {
