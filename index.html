@@ -10,6 +10,7 @@
 <meta name="apple-mobile-web-app-title" content="Ralph Kitchen">
 <meta name="theme-color" content="#F6F6F4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon-192.png">
@@ -230,7 +231,7 @@ nav.tabs button *{pointer-events:none}
 </head>
 <body>
 <div class="wrap">
-  <header class="top"><h1>Ralph Kitchen</h1><span class="sync" id="sync">v10</span></header>
+  <header class="top"><h1>Ralph Kitchen</h1><span class="sync" id="sync">v12</span></header>
   <main id="view" aria-live="polite"></main>
 </div>
 <nav class="tabs" aria-label="Sections"><div class="in" id="tabs"></div></nav>
@@ -380,6 +381,64 @@ const DL_LOCAL = {
   }
 };
 
+/* ---------- private Gist sync ---------- */
+const SYNC = {
+  get token(){ try{ return localStorage.getItem('rk:ghtoken') || ''; }catch(e){ return ''; } },
+  get gist(){ try{ return localStorage.getItem('rk:gistid') || ''; }catch(e){ return ''; } },
+  set gist(v){ try{ localStorage.setItem('rk:gistid', v); }catch(e){} },
+  get last(){ try{ return localStorage.getItem('rk:synced') || ''; }catch(e){ return ''; } },
+  set last(v){ try{ localStorage.setItem('rk:synced', v); }catch(e){} },
+  get stamp(){ try{ return +localStorage.getItem('rk:updated') || 0; }catch(e){ return 0; } },
+  set stamp(v){ try{ localStorage.setItem('rk:updated', String(v)); }catch(e){} },
+  busy: false, timer: null, error: '',
+  headers(){ return {'Authorization': 'Bearer ' + SYNC.token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}; },
+  snapshot(){ const out = {app:'ralph-kitchen', version:1, updated: SYNC.stamp || Date.now(), data:{}}; KEYS.forEach(k => out.data[k] = S[k]); return out; },
+  async request(url, opts){
+    let res;
+    try{ res = await fetch(url, opts); }catch(e){ throw {code:'network'}; }
+    if(res.status === 401 || res.status === 403) throw {code:'bad_token'};
+    if(res.status === 404) throw {code:'no_gist'};
+    if(!res.ok) throw {code:'gist_error', message: 'GitHub said ' + res.status};
+    return res.json();
+  },
+  async push(){
+    if(!SYNC.token || SYNC.busy) return;
+    SYNC.busy = true;
+    try{
+      const body = {description:'Ralph Kitchen data (private)', files:{'ralph-kitchen.json':{content: JSON.stringify(SYNC.snapshot())}}};
+      if(SYNC.gist) await SYNC.request('https://api.github.com/gists/' + SYNC.gist, {method:'PATCH', headers:SYNC.headers(), body:JSON.stringify(body)});
+      else { const j = await SYNC.request('https://api.github.com/gists', {method:'POST', headers:SYNC.headers(), body:JSON.stringify(Object.assign({public:false}, body))}); SYNC.gist = j.id; }
+      SYNC.last = new Date().toISOString(); SYNC.error = '';
+    }catch(e){ SYNC.error = e.code || 'gist_error'; }
+    finally{ SYNC.busy = false; if(ui.tab === 'setup' && $('#sheet').hidden) render(); }
+  },
+  async pull(force){
+    if(!SYNC.token || !SYNC.gist) return false;
+    const j = await SYNC.request('https://api.github.com/gists/' + SYNC.gist, {headers:SYNC.headers()});
+    const f = j.files && j.files['ralph-kitchen.json'];
+    if(!f) return false;
+    let text = f.content;
+    if(f.truncated && f.raw_url){ try{ const r = await fetch(f.raw_url); text = await r.text(); }catch(e){} }
+    let remote; try{ remote = JSON.parse(text); }catch(e){ return false; }
+    const d = remote && remote.data; if(!d) return false;
+    if(!force && !((remote.updated || 0) > SYNC.stamp)) return false;
+    KEYS.forEach(k => { if(d[k] && typeof d[k] === 'object'){ S[k] = fill(k, d[k]); localSet(k, S[k]); } });
+    SYNC.stamp = remote.updated || Date.now(); SYNC.last = new Date().toISOString();
+    return true;
+  },
+  queue(){
+    if(!SYNC.token) return;
+    SYNC.stamp = Date.now();
+    clearTimeout(SYNC.timer);
+    SYNC.timer = setTimeout(() => SYNC.push(), 2500);
+  },
+  ago(){
+    if(!SYNC.last) return '';
+    const m = Math.round((Date.now() - new Date(SYNC.last).getTime()) / 60000);
+    return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m/60) + ' h ago';
+  }
+};
+
 /* ---------- state + storage ---------- */
 const DEF = {
   pantry:{items:[], log:[]},
@@ -405,6 +464,7 @@ const dirty = {};
 function save(k){
   dirty[k] = Date.now();
   localSet(k, S[k]);
+  SYNC.queue();
   if(!store.db) return;
   clearTimeout(timers[k]);
   timers[k] = setTimeout(() => {
@@ -439,7 +499,7 @@ function renderTabs(){
 }
 function render(){
   renderTabs();
-  $('#sync').textContent = SAMPLE ? 'v10' : 'v10, setup needed';
+  $('#sync').textContent = SAMPLE ? 'v12' : 'v12, setup needed';
   const v = $('#view');
   v.innerHTML = ({kitchen:viewKitchen, week:viewWeek, shop:viewShop, setup:viewSetup})[ui.tab]();
 }
@@ -693,11 +753,17 @@ function viewSetup(){
       <label class="f"><span>Planning and photos</span><input type="text" data-local="model" value="${esc(API.model())}" autocapitalize="off"></label>
       <label class="f"><span>Quick tasks</span><input type="text" data-local="quick" value="${esc(API.quick())}" autocapitalize="off"></label>
       <button class="btn small ghost mt" data-act="resetModels">Reset to defaults</button>
+      <button class="btn small ghost mt" data-act="forceUpdate">Force update</button>
     </details>
   </div>
-  <div class="section"><h2>Backup</h2></div>
+  <div class="section"><h2>Backup and sync</h2></div>
   <div class="panel">
-    <p class="hint" style="margin-top:0">Save a copy of everything, or load one in, e.g. from the old Claude app version.</p>
+    <p style="margin:0"><span class="tag ${SYNC.token ? (SYNC.error ? 'gone' : 'low') : 'gone'}">${SYNC.token ? (SYNC.error ? 'Sync problem: ' + esc(SYNC.error) : (SYNC.last ? 'Synced ' + esc(SYNC.ago()) : 'Connected, not synced yet')) : 'Not syncing'}</span></p>
+    <p class="hint">Keeps everything in a private GitHub Gist, so nothing is lost if this phone or the icon goes. Make a token at github.com \u2192 Settings \u2192 Developer settings \u2192 Personal access tokens, with only the \u201cgist\u201d box ticked.</p>
+    <label class="f"><span>GitHub token</span><input type="password" id="ghToken" placeholder="${SYNC.token ? 'Saved, ending ' + esc(SYNC.token.slice(-4)) : 'github_pat\u2026'}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+    <div class="row-btns mt"><button class="btn primary" data-act="saveToken">Save token</button>${SYNC.token?'<button class="btn" data-act="syncNow">Sync now</button><button class="btn ghost" data-act="pullNow">Restore from sync</button>':''}</div>
+    <div class="hr"></div>
+    <p class="hint" style="margin-top:0">Or keep a copy as a file.</p>
     <div class="row-btns"><button class="btn" data-act="exportData">Export backup</button><label class="btn" style="cursor:pointer">Import backup<input type="file" id="importFile" accept=".json,application/json" hidden></label></div>
   </div>
   <p class="hint mt">Your kitchen, plans and saved recipes are stored on this phone. Export a backup now and then.</p>`;
@@ -1188,6 +1254,9 @@ function errCopy(e){
   }catch(err){}
   switch(e && e.code){
     case 'bad_key': return 'Your API key was rejected. Check it in Setup.';
+    case 'bad_token': return 'GitHub rejected the sync token. Check it has the gist permission.';
+    case 'no_gist': return 'That sync file is gone from GitHub. Save the token again to start a new one.';
+    case 'gist_error': return 'Sync failed' + (e.message ? ': ' + e.message : '.');
     case 'no_credit': return 'Your Anthropic account is out of credit. Top up at console.anthropic.com.';
     case 'bad_model': return 'The model name was rejected. Reset models in Setup.';
     case 'overloaded': return 'Claude is busy right now. Try again in a minute.';
@@ -1555,7 +1624,27 @@ const ACT = {
   saveKey: () => { const v = ($('#apiKey').value || '').trim(); if(!/^sk-ant-/.test(v)){ toast('That doesn\u2019t look like an Anthropic key. It starts with sk-ant-'); return; } localSet('apikey', v); try{ localStorage.setItem('rk:apikey', v); }catch(e){} initApi(); render(); toast('Key saved. Tap Test connection to check it.'); },
   testKey: async t => { t.disabled = true; t.textContent = 'Testing\u2026'; try{ await API.call('Reply with the word ok.', {quick:true, max:10}); toast('Connected. You\u2019re good to go.'); }catch(e){ toast(errCopy(e)); } t.disabled = false; t.textContent = 'Test connection'; },
   clearErr: () => { try{ localStorage.removeItem('rk:lasterr'); }catch(e){} render(); },
+  forceUpdate: async () => {
+    try{
+      if(window.caches){ const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); }
+      if(navigator.serviceWorker){ const rs = await navigator.serviceWorker.getRegistrations(); await Promise.all(rs.map(r => r.unregister())); }
+    }catch(e){}
+    location.replace(location.pathname + '?v=' + Date.now());
+  },
   resetModels: () => { try{ localStorage.removeItem('rk:model'); localStorage.removeItem('rk:quick'); }catch(e){} render(); toast('Models reset.'); },
+  saveToken: () => {
+    const v = ($('#ghToken').value || '').trim();
+    if(!v){ toast('Paste a token first.'); return; }
+    try{ localStorage.setItem('rk:ghtoken', v); }catch(e){}
+    SYNC.error = ''; SYNC.stamp = Date.now();
+    SYNC.push().then(() => { render(); toast(SYNC.error ? errCopy({code:SYNC.error}) : 'Syncing. Your data is backed up now.'); });
+  },
+  syncNow: () => { SYNC.stamp = Date.now(); SYNC.push().then(() => { render(); toast(SYNC.error ? errCopy({code:SYNC.error}) : 'Synced.'); }); },
+  pullNow: async () => {
+    if(!confirm('Replace what\u2019s on this phone with the synced copy?')) return;
+    try{ const ok = await SYNC.pull(true); render(); toast(ok ? 'Restored from sync.' : 'Nothing to restore yet.'); }
+    catch(e){ toast(errCopy(e)); }
+  },
   exportData: () => { const out = {app:'ralph-kitchen', version:1, exported:new Date().toISOString(), data:{}}; KEYS.forEach(k => out.data[k] = S[k]); DL.save({filename:`ralph-kitchen-backup-${todayISO()}.json`, data: JSON.stringify(out, null, 1)}).catch(e => { if(!(e && e.code === 'declined')) toast('Couldn\u2019t export.'); }); },
   copyMsg: async () => {
     const ta = $('#chatMsg'); let ok = false;
@@ -1676,7 +1765,9 @@ document.addEventListener('keydown', e => { if(e.key === 'Escape' && !$('#sheet'
 /* ---------- boot ---------- */
 let samplesChecked = false;
 function initApi(){ SAMPLE = API.key() ? SAMPLE_API : null; DL = DL_LOCAL; ui.scanOk = !!SAMPLE; ui.scanMax = 10; }
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 initApi(); samplesChecked = true;
+if(SYNC.token){ SYNC.pull().then(changed => { if(changed && $('#sheet').hidden) render(); }).catch(e => { SYNC.error = e.code || 'gist_error'; }); }
 if(!API.key()){ ui.tab = 'setup'; }
 render();
 </script>
