@@ -230,7 +230,7 @@ nav.tabs button *{pointer-events:none}
 </head>
 <body>
 <div class="wrap">
-  <header class="top"><h1>Ralph Kitchen</h1><span class="sync" id="sync">This device</span></header>
+  <header class="top"><h1>Ralph Kitchen</h1><span class="sync" id="sync">v9</span></header>
   <main id="view" aria-live="polite"></main>
 </div>
 <nav class="tabs" aria-label="Sections"><div class="in" id="tabs"></div></nav>
@@ -415,7 +415,7 @@ function renderTabs(){
 }
 function render(){
   renderTabs();
-  $('#sync').textContent = SAMPLE ? '' : 'Setup needed';
+  $('#sync').textContent = SAMPLE ? 'v9' : 'v9, setup needed';
   const v = $('#view');
   v.innerHTML = ({kitchen:viewKitchen, week:viewWeek, shop:viewShop, setup:viewSetup})[ui.tab]();
 }
